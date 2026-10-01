@@ -1,0 +1,132 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/bcollard/mcp-marketplace
+  tag: "1.0"
+  pullPolicy: IfNotPresent
+
+# imagePullSecrets:
+#   - name: ghcr-credentials
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+
+service:
+  type: ClusterIP
+  port: 3001
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: mcp-marketplace.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources: {}
+#  requests:
+#    cpu: 100m
+#    memory: 128Mi
+#  limits:
+#    cpu: 500m
+#    memory: 256Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 80
+
+# Liveness / readiness probes
+# The MCP endpoint only handles POST; use a lightweight TCP probe by default.
+livenessProbe:
+  tcpSocket:
+    port: http
+  initialDelaySeconds: 10
+  periodSeconds: 15
+
+readinessProbe:
+  tcpSocket:
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+auth:
+  # Header used by the app to read caller token.
+  # If set to "authorization", the app expects "Bearer <token>" format.
+  # For any other header name, the app expects the raw token value.
+  headerName: "authorization"
+
+# Log level: INFO (default) logs tool calls and external token endpoint requests.
+# DEBUG additionally logs incoming/exchanged tokens and their JWT claims.
+logLevel: "INFO"
+
+# ---------------------------------------------------------------------------
+# OAuth Token Exchange (RFC 8693) — same-domain credentials
+# ---------------------------------------------------------------------------
+tokenExchange:
+  # Token endpoint of the Authorization Server
+  tokenEndpointUrl: ""
+  # Client ID registered for this MCP server (CLIENT_ID_TE_SAME_DOMAIN)
+  clientId: ""
+  # Target resource / audience for the exchanged token (TOKEN_EXCHANGE_TARGET_RESOURCE)
+  targetResource: "https://api.runlocal.dev/httpbin"
+  # Space-separated scopes requested for the exchanged token (TOKEN_EXCHANGE_TARGET_SCOPES)
+  targetScopes: "httpbin:read httpbin:write"
+  # Secret management for CLIENT_SECRET_TE_SAME_DOMAIN
+  clientSecret:
+    # Set to true to let the chart create the Kubernetes Secret from secretValue below.
+    # Set to false to manage the Secret externally (e.g. External Secrets Operator)
+    # and supply the name via existingSecretName.
+    create: true
+    # Only used when clientSecret.create=true.
+    secretValue: ""
+    # Name of an existing Secret to use when clientSecret.create=false.
+    # The Secret must contain a key named "clientSecret".
+    existingSecretName: ""
+
+# ---------------------------------------------------------------------------
+# JWT Bearer grant (RFC 7523) — other-domain credentials
+# ---------------------------------------------------------------------------
+jwtBearer:
+  # Token endpoint for the JWT Bearer grant (JWT_BEARER_TOKEN_EXCHANGE_URL; defaults to tokenExchange.tokenEndpointUrl)
+  tokenEndpointUrl: ""
+  # Client ID for the JWT Bearer grant (CLIENT_ID_JWT_OTHER_DOMAIN)
+  clientId: ""
+  # Target resource / audience for the issued token (JWT_BEARER_TARGET_RESOURCE)
+  targetResource: "https://api.runlocal.dev/httpbin"
+  # Space-separated scopes requested for the issued token (JWT_BEARER_TARGET_SCOPES)
+  targetScopes: "httpbin:read httpbin:write"
+  # Secret management for CLIENT_SECRET_JWT_OTHER_DOMAIN
+  clientSecret:
+    # Set to true to let the chart create the Kubernetes Secret from secretValue below.
+    # Set to false to manage the Secret externally (e.g. External Secrets Operator)
+    # and supply the name via existingSecretName.
+    create: true
+    # Only used when clientSecret.create=true.
+    secretValue: ""
+    # Name of an existing Secret to use when clientSecret.create=false.
+    # The Secret must contain a key named "clientSecret".
+    existingSecretName: ""

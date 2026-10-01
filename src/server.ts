@@ -1,10 +1,11 @@
 // src/server.ts
-import type { Request, Response } from "express";
+import type { NextFunction, Request, Response } from "express";
 import express from "express";
 import cors from "cors";
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { exchangeToken, exchangeJwtBearer, rawTokenStorage, tokenExchangeConfig, jwtBearerConfig, decodeJwtClaims, logger } from "./tokenExchange.js";
 
 // -------------------- In-memory data --------------------
 const users: Record<string, string> = {
@@ -62,8 +63,8 @@ const orders: Order[] = [
 
 // -------------------- MCP Server --------------------
 const server = new McpServer({
-  name: "sample-users-mcp",
-  version: "1.1.0"
+  name: "Marketplace MCP Server - Demo",
+  version: "1.6.0"
 });
 
 // Tool: list all users
@@ -78,6 +79,7 @@ server.registerTool(
     }
   },
   async () => {
+    logger.info("[tool:list_users] called");
     const list = Object.entries(users).map(([id, fullName]) => ({ id, fullName }));
     const output = { users: list };
     return {
@@ -100,6 +102,7 @@ server.registerTool(
     }
   },
   async ({ id }) => {
+    logger.info(`[tool:get_user] called | args: ${JSON.stringify({ id })}`);
     const fullName = users[id];
     const output =
       fullName != null
@@ -126,6 +129,7 @@ server.registerTool(
     }
   },
   async () => {
+    logger.info("[tool:list_orders] called");
     const output = { orders };
     return {
       content: [{ type: "text", text: JSON.stringify(output, null, 2) }],
@@ -149,6 +153,7 @@ server.registerTool(
     }
   },
   async ({ userId }) => {
+    logger.info(`[tool:list_orders_for_user] called | args: ${JSON.stringify({ userId })}`);
     const exists = users[userId] != null;
     const userOrders = exists ? orders.filter((o) => o.userId === userId) : [];
     const output = { userExists: !!exists, orders: userOrders };
@@ -174,9 +179,129 @@ server.registerTool(
     }
   },
   async ({ q }) => {
+    logger.info(`[tool:search_orders] called | args: ${JSON.stringify({ q })}`);
     const needle = q.toLowerCase();
     const results = orders.filter((o) => o.name.toLowerCase().includes(needle));
     const output = { count: results.length, results };
+    return {
+      content: [{ type: "text", text: JSON.stringify(output, null, 2) }],
+      structuredContent: output
+    };
+  }
+);
+
+// Tool: call the configured TARGET_RESOURCE using the exchanged token,
+// forwarding JWT claims as X-Jwt-* headers so the downstream service can
+// identify the caller without re-parsing the token itself.
+server.registerTool(
+  "play_with_token_exchange",
+  {
+    title: "Play with token exchange",
+    description:
+      "Play with token exchange. " +  
+      "Calls TARGET_RESOURCE using the exchanged Bearer token. " +
+      "Scalar claims from the token (sub, scope, azp, iss, …) are forwarded " +
+      "as X-Jwt-<claim> headers. The raw response body is returned as a string.",
+    inputSchema: {
+      path: z.string().default("/headers").describe("Path appended to TARGET_RESOURCE, e.g. /get or /headers")
+    },
+    outputSchema: {
+      status: z.number(),
+      body: z.string()
+    }
+  },
+  async ({ path }) => {
+    logger.info(`[tool:play_with_token_exchange] called | args: ${JSON.stringify({ path })}`);
+    const authHeader = rawTokenStorage.getStore();
+    const isAuthorizationHeader = AUTH_HEADER_NAME === "authorization";
+
+    if (!authHeader) {
+      throw new Error(`Request must include a token in the ${AUTH_HEADER_NAME} header`);
+    }
+    if (isAuthorizationHeader && !authHeader.startsWith("Bearer ")) {
+      throw new Error("Request must include a Bearer token in the authorization header");
+    }
+
+    const incomingToken = isAuthorizationHeader ? authHeader.slice(7) : authHeader;
+    const token = await exchangeToken(incomingToken);
+    const claims = decodeJwtClaims(token);
+
+    // Map every scalar claim to an X-Jwt-<claim> header
+    const claimHeaders: Record<string, string> = {};
+    for (const [key, value] of Object.entries(claims)) {
+      if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+        claimHeaders[`X-Jwt-${key}`] = String(value);
+      }
+    }
+
+    const url = `${tokenExchangeConfig.targetResource}${path}`;
+    const response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...claimHeaders
+      }
+    });
+
+    const body = await response.text();
+    const output = { status: response.status, body };
+    return {
+      content: [{ type: "text", text: JSON.stringify(output, null, 2) }],
+      structuredContent: output
+    };
+  }
+);
+
+// Tool: same as play_with_token_exchange but uses RFC 7523 JWT Bearer grant
+// with CLIENT_ID_JWT_OTHER_DOMAIN / CLIENT_SECRET_JWT_OTHER_DOMAIN credentials.
+server.registerTool(
+  "play_with_jwt_bearer",
+  {
+    title: "Play with JWT Bearer",
+    description:
+      "Play with JWT Bearer grant (RFC 7523). " +
+      "Builds a signed JWT assertion from the caller's sub, exchanges it for an access token " +
+      "via the jwt-bearer grant, then calls TARGET_RESOURCE forwarding scalar claims as X-Jwt-* headers.",
+    inputSchema: {
+      path: z.string().default("/headers").describe("Path appended to TARGET_RESOURCE, e.g. /get or /headers")
+    },
+    outputSchema: {
+      status: z.number(),
+      body: z.string()
+    }
+  },
+  async ({ path }) => {
+    logger.info(`[tool:play_with_jwt_bearer] called | args: ${JSON.stringify({ path })}`);
+    const authHeader = rawTokenStorage.getStore();
+    const isAuthorizationHeader = AUTH_HEADER_NAME === "authorization";
+
+    if (!authHeader) {
+      throw new Error(`Request must include a token in the ${AUTH_HEADER_NAME} header`);
+    }
+    if (isAuthorizationHeader && !authHeader.startsWith("Bearer ")) {
+      throw new Error("Request must include a Bearer token in the authorization header");
+    }
+
+    const incomingToken = isAuthorizationHeader ? authHeader.slice(7) : authHeader;
+    const token = await exchangeJwtBearer(incomingToken);
+    const claims = decodeJwtClaims(token);
+
+    const claimHeaders: Record<string, string> = {};
+    for (const [key, value] of Object.entries(claims)) {
+      if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+        claimHeaders[`X-Jwt-${key}`] = String(value);
+      }
+    }
+
+    const url = `${jwtBearerConfig.targetResource}${path}`;
+    const response = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...claimHeaders
+      }
+    });
+
+    const body = await response.text();
+    const output = { status: response.status, body };
     return {
       content: [{ type: "text", text: JSON.stringify(output, null, 2) }],
       structuredContent: output
@@ -188,6 +313,8 @@ server.registerTool(
 const app = express();
 app.use(express.json());
 
+const AUTH_HEADER_NAME = (process.env.AUTH_HEADER_NAME || "authorization").toLowerCase();
+
 // CORS: expose the MCP session header for browser clients (per MCP spec session ID mechanism).
 // Note: in production, validate allowed origins carefully (see security guidance below).
 app.use(
@@ -197,6 +324,14 @@ app.use(
     exposedHeaders: ["Mcp-Session-Id"]
   })
 );
+
+// Auth middleware: forward the raw auth header value into AsyncLocalStorage.
+// Header validation and token exchange are handled by the tools that need them.
+app.use("/mcp", (req: Request, _res: Response, next: NextFunction) => {
+  const rawAuthHeader = req.headers[AUTH_HEADER_NAME];
+  const authHeader = Array.isArray(rawAuthHeader) ? rawAuthHeader[0] : rawAuthHeader;
+  rawTokenStorage.run(authHeader ?? "", () => next());
+});
 
 // Single MCP endpoint (no REST business routes).
 // The SDK handles Streamable HTTP semantics (JSON or SSE responses) behind this transport.
@@ -221,5 +356,5 @@ app.post("/mcp", async (req: Request, res: Response) => {
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`MCP Server (Streamable HTTP) listening at http://localhost:${PORT}/mcp`);
+  console.log(`MCP Server (Streamable HTTP) listening at http://localhost:${PORT}/mcp (auth header: ${AUTH_HEADER_NAME})`);
 });

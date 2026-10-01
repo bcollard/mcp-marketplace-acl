@@ -1,0 +1,6 @@
+apiVersion: v2
+name: mcp-marketplace
+description: MCP server with OAuth token exchange (RFC 8693) support
+type: application
+version: 0.2.4
+appVersion: "1.6.1"
